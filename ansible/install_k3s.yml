@@ -1,0 +1,72 @@
+- hosts: Yoba_servers
+  ignore_errors: yes
+  become: yes
+  vars:
+    token_server: VeryStrongSecret
+
+  tasks:
+
+  - block: #==Настройка nginx балансера для контрол нод==
+    - name: Копирование файла конфига
+      copy:
+        src: /terraform-ansible-k3s/Nginx/nginx.conf
+        dest: /terraform-ansible-k3s/Nginx/
+    - name: Установка докер nginx и проброс волюма
+      community.docker.docker_container:
+        name: nginx_control_lb
+        image: nginx
+        ports:
+          - "6443:6443"
+        volumes:
+          - "/terraform-ansible-k3s/Nginx/:/etc/nginx/"
+    - name: Получение ip седьмой машины
+      set_fact:
+        ip_yoba7: "{{ ansible_default_ipv4.address }}"
+    when: inventory_hostname == "yoba_fett7"
+
+  - block: #==Установка и настройка центральной ноды==
+    - name: Установка k3s на центральную ноду
+      shell: curl -sfL https://get.k3s.io | sh -s - server --token={{ token_server }} --tls-san {{ hostvars['yoba_fett7'].ip_yoba7 }} --cluster-init
+    - name: Получение данных из файла для присоединения нод
+      shell: cat /var/lib/rancher/k3s/server/node-token
+      register: token
+    - name: Запись токена
+      set_fact:
+        token: "{{ token.stdout }}"
+    - name: Получение ip первой машины
+      set_fact:
+        ip_yoba1: "{{ ansible_default_ipv4.address }}"
+    when: inventory_hostname == "yoba_fett1"
+
+  - block: #==Установка и настройка еще двух контрол нод==
+    - name: Установка k3s на контрол ноды
+      shell: curl -sfL https://get.k3s.io | sh -s - server --token={{ token_server }} --tls-san {{ hostvars['yoba_fett7'].ip_yoba7 }} --server https://{{ hostvars['yoba_fett1'].ip_yoba1 }}:6443
+    when: inventory_hostname == "yoba_fett2" or inventory_hostname == "yoba_fett3"
+
+  - block: #==Установка и настройка воркер нод нод==
+    - name: Установка k3s на воркер ноды
+      shell: curl -sfL https://get.k3s.io | K3S_URL=https://{{ hostvars['yoba_fett1'].ip_yoba1 }}:6443 K3S_TOKEN={{ hostvars['yoba_fett1'].token }} sh -
+    when: inventory_hostname != "yoba_fett1" and inventory_hostname != "yoba_fett2" and inventory_hostname != "yoba_fett3"
+
+  - block: #==Копирование и запуск деплоя и сервисов==
+    - name: Копирование файла деплоя
+      copy:
+        src: /terraform-ansible-k3s/k3s/deploy.yml
+        dest: /root/deploy.yml
+    - name: Копирование файла сервиса
+      copy:
+        src: /terraform-ansible-k3s/k3s/service.yml
+        dest: /root/service.yml
+    - name: Деплой приложения
+      shell: kubectl apply -f /root/deploy.yml
+    - name: Деплой сервиса
+      shell: kubectl apply -f /root/service.yml
+    when: inventory_hostname == "yoba_fett1"
+
+  - block: #==Получение файла для управления кубером==
+    - name: Получение данных конфига кластера
+      fetch:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: ../k3s/terraform-ansible-k3s.yml
+        flat: yes
+    when: inventory_hostname == "yoba_fett1"
